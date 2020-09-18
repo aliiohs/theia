@@ -35,6 +35,17 @@ import Route = require('route-parser');
 
 export const MessagingContainer = Symbol('MessagingContainer');
 
+/**
+ * When a frontend connects to the backend, a set of services are allocated just for it.
+ *
+ * This session ID should help you indentify which actual client is active in your handler context.
+ *
+ * Opaque type.
+ */
+export const MessagingSessionId = Symbol('MessagingSessionId');
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type MessagingSessionId = any;
+
 @injectable()
 export class MessagingContribution implements BackendApplicationContribution, MessagingService {
 
@@ -47,6 +58,7 @@ export class MessagingContribution implements BackendApplicationContribution, Me
     @inject(ContributionProvider) @named(MessagingService.Contribution)
     protected readonly contributions: ContributionProvider<MessagingService.Contribution>;
 
+    protected sessionIdSequence = 0;
     protected webSocketServer: ws.Server | undefined;
     protected readonly wsHandlers = new MessagingContribution.ConnectionHandlers<ws>();
     protected readonly channelHandlers = new MessagingContribution.ConnectionHandlers<WebSocketChannel>();
@@ -175,6 +187,7 @@ export class MessagingContribution implements BackendApplicationContribution, Me
 
     protected createSocketContainer(socket: ws): Container {
         const connectionContainer: Container = this.container.createChild() as Container;
+        connectionContainer.bind(MessagingSessionId).toConstantValue(this.sessionIdSequence++);
         connectionContainer.bind(ws).toConstantValue(socket);
         return connectionContainer;
     }

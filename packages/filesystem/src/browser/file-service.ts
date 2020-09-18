@@ -1273,63 +1273,42 @@ export class FileService {
      */
     readonly onDidFilesChange = this.onDidFilesChangeEmitter.event;
 
-    private activeWatchers = new Map<string, { disposable: Disposable, count: number }>();
-
     watch(resource: URI, options: WatchOptions = { recursive: false, excludes: [] }): Disposable {
         const resolvedOptions: WatchOptions = {
             ...options,
             // always ignore temporary upload files
             excludes: options.excludes.concat('**/theia_upload_*')
         };
-
-        let watchDisposed = false;
-        let watchDisposable = Disposable.create(() => watchDisposed = true);
-
-        // Watch and wire in disposable which is async but
-        // check if we got disposed meanwhile and forward
-        this.doWatch(resource, resolvedOptions).then(disposable => {
-            if (watchDisposed) {
-                disposable.dispose();
-            } else {
-                watchDisposable = disposable;
-            }
-        }, error => console.error(error));
-
-        return Disposable.create(() => watchDisposable.dispose());
-    }
-
-    async doWatch(resource: URI, options: WatchOptions): Promise<Disposable> {
-        const provider = await this.withProvider(resource);
-        const key = this.toWatchKey(provider, resource, options);
-
-        // Only start watching if we are the first for the given key
-        const watcher = this.activeWatchers.get(key) || { count: 0, disposable: provider.watch(resource, options) };
-        if (!this.activeWatchers.has(key)) {
-            this.activeWatchers.set(key, watcher);
-        }
-
-        // Increment usage counter
-        watcher.count += 1;
-
-        return Disposable.create(() => {
-
-            // Unref
-            watcher.count--;
-
-            // Dispose only when last user is reached
-            if (watcher.count === 0) {
-                watcher.disposable.dispose();
-                this.activeWatchers.delete(key);
-            }
-        });
-    }
-
-    private toWatchKey(provider: FileSystemProvider, resource: URI, options: WatchOptions): string {
-        return [
-            this.toMapKey(provider, resource), 	// lowercase path if the provider is case insensitive
-            String(options.recursive),			// use recursive: true | false as part of the key
-            options.excludes.join()				// use excludes as part of the key
-        ].join();
+        /**
+         * Disposable handle. Can be disposed early (before the watcher is allocated.)
+         */
+        const handle = {
+            disposed: false,
+            watcher: undefined as Disposable | undefined,
+            dispose(): void {
+                if (this.disposed) {
+                    return;
+                }
+                if (this.watcher) {
+                    this.watcher.dispose();
+                    this.watcher = undefined;
+                }
+                this.disposed = true;
+            },
+        };
+        this.withProvider(resource)
+            .then(provider => {
+                const watcher = provider.watch(resource, resolvedOptions);
+                // If the handle got disposed before allocation, stop here.
+                if (handle.disposed) {
+                    watcher.dispose();
+                } else {
+                    handle.watcher = watcher;
+                }
+            }, error => {
+                console.error(error);
+            });
+        return handle;
     }
 
     // #endregion

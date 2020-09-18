@@ -14,69 +14,56 @@
  * SPDX-License-Identifier: EPL-2.0 OR GPL-2.0 WITH Classpath-exception-2.0
  ********************************************************************************/
 
-import * as path from 'path';
 import { injectable, inject } from 'inversify';
-import { JsonRpcProxyFactory, ILogger, ConnectionErrorHandler, DisposableCollection, Disposable } from '@theia/core';
-import { IPCConnectionProvider } from '@theia/core/lib/node/messaging';
-import { FileSystemWatcherServer, WatchOptions, FileSystemWatcherClient, ReconnectingFileSystemWatcherServer } from '../common/filesystem-watcher-protocol';
-import { NsfwOptions } from './nsfw-watcher/nsfw-options';
+import { FileSystemWatcherServer, WatchOptions, FileSystemWatcherClient, FileSystemWatcherServer2 } from '../common/filesystem-watcher-protocol';
+import { MessagingSessionId } from '@theia/core/src/node/messaging/messaging-contribution';
+import { FileSystemWatcherServerDispatcher } from './filesystem-watcher-dispatcher';
 
 export const NSFW_WATCHER = 'nsfw-watcher';
 
+/**
+ * Wraps the NSFW singleton server for each frontend.
+ */
 @injectable()
 export class FileSystemWatcherServerClient implements FileSystemWatcherServer {
 
-    protected readonly proxyFactory = new JsonRpcProxyFactory<FileSystemWatcherServer>();
-    protected readonly remote = new ReconnectingFileSystemWatcherServer(this.proxyFactory.createProxy());
+    /**
+     * Track allocated watcherIds to de-allocate on disposal.
+     */
+    protected watcherIds = new Set<number>();
 
-    protected readonly toDispose = new DisposableCollection();
+    @inject(MessagingSessionId)
+    protected readonly sessionId: MessagingSessionId;
 
-    constructor(
-        @inject(ILogger) protected readonly logger: ILogger,
-        @inject(IPCConnectionProvider) protected readonly ipcConnectionProvider: IPCConnectionProvider,
-        @inject(NsfwOptions) protected readonly nsfwOptions: NsfwOptions
-    ) {
-        this.remote.setClient({
-            onDidFilesChanged: e => {
-                if (this.client) {
-                    this.client.onDidFilesChanged(e);
-                }
-            }
-        });
-        this.toDispose.push(this.remote);
-        this.toDispose.push(this.listen());
+    @inject(FileSystemWatcherServerDispatcher)
+    protected readonly watcherDispatcher: FileSystemWatcherServerDispatcher;
+
+    @inject(FileSystemWatcherServer2)
+    protected readonly watcherServer: FileSystemWatcherServer2;
+
+    async watchFileChanges(uri: string, options?: WatchOptions): Promise<number> {
+        const watcherId = await this.watcherServer.watchFileChanges2(this.sessionId, uri, options);
+        this.watcherIds.add(watcherId);
+        return watcherId;
+    }
+
+    async unwatchFileChanges(watcherId: number): Promise<void> {
+        this.watcherIds.delete(watcherId);
+        return this.watcherServer.unwatchFileChanges2(watcherId);
+    }
+
+    setClient(client: FileSystemWatcherClient | undefined): void {
+        if (typeof client !== 'undefined') {
+            this.watcherDispatcher.registerClient(this.sessionId, client);
+        } else {
+            this.watcherDispatcher.unregisterClient(this.sessionId);
+        }
     }
 
     dispose(): void {
-        this.toDispose.dispose();
+        this.setClient(undefined);
+        for (const watcherId of this.watcherIds) {
+            this.unwatchFileChanges(watcherId);
+        }
     }
-
-    watchFileChanges(uri: string, options?: WatchOptions): Promise<number> {
-        return this.remote.watchFileChanges(uri, options);
-    }
-
-    unwatchFileChanges(watcher: number): Promise<void> {
-        return this.remote.unwatchFileChanges(watcher);
-    }
-
-    protected client: FileSystemWatcherClient | undefined;
-    setClient(client: FileSystemWatcherClient | undefined): void {
-        this.client = client;
-    }
-
-    protected listen(): Disposable {
-        return this.ipcConnectionProvider.listen({
-            serverName: NSFW_WATCHER,
-            entryPoint: path.resolve(__dirname, NSFW_WATCHER),
-            errorHandler: new ConnectionErrorHandler({
-                serverName: NSFW_WATCHER,
-                logger: this.logger
-            }),
-            args: [
-                `--nsfwOptions=${JSON.stringify(this.nsfwOptions)}`
-            ],
-            env: process.env
-        }, connection => this.proxyFactory.listen(connection));
-    }
-
 }
